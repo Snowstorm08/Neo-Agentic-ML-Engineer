@@ -1,5 +1,4 @@
 import { useCallback, useState } from "react";
-
 import type { FactRecord } from "../lib/facts";
 
 export type FactAction = {
@@ -10,35 +9,35 @@ export type FactAction = {
 
 export function useFacts() {
   const [facts, setFacts] = useState<FactRecord[]>([]);
-  const [error] = useState<string | null>(null);
-  const loading = false;
 
+  // Perform the action based on the provided type ("save" or "discard")
   const performAction = useCallback(async (action: FactAction) => {
-    setFacts((current) => {
+    setFacts((currentFacts) => {
       if (action.type === "save") {
         const text = (action.factText ?? "").trim();
-        if (!text) {
-          return current;
+        // Return current state if the text is empty or the fact already exists
+        if (!text || currentFacts.some((fact) => fact.id === action.factId)) {
+          return currentFacts;
         }
-        if (current.some((fact) => fact.id === action.factId)) {
-          return current;
-        }
-        const saved: FactRecord = {
+        
+        // Create a new fact object to add to the list
+        const newFact: FactRecord = {
           id: action.factId,
           text,
           status: "saved",
           createdAt: new Date().toISOString(),
         };
-        return [...current, saved];
+        return [...currentFacts, newFact];
       }
 
-      return current.filter((fact) => fact.id !== action.factId);
+      // Discard the fact by filtering it out based on factId
+      return currentFacts.filter((fact) => fact.id !== action.factId);
     });
   }, []);
 
   const refresh = useCallback(() => {
-    /* no-op: facts are stored in-memory */
+    // No-op: facts are stored in memory, so there's no need to refresh externally
   }, []);
 
-  return { facts, loading, error, refresh, performAction };
+  return { facts, performAction, refresh };
 }
