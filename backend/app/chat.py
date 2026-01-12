@@ -1,4 +1,7 @@
-"""ChatKit server integration for the boilerplate backend."""
+"""
+ChatKit server integration for the boilerplate backend.
+Optimized, cleaned up, and hardened version.
+"""
 
 from __future__ import annotations
 
@@ -32,30 +35,22 @@ from .constants import INSTRUCTIONS, MODEL
 from .facts import Fact, fact_store
 from .memory_store import MemoryStore
 from .sample_widget import render_weather_widget, weather_widget_copy_text
-from .weather import (
-    WeatherLookupError,
-    retrieve_weather,
-)
-from .weather import (
-    normalize_unit as normalize_temperature_unit,
-)
+from .weather import WeatherLookupError, retrieve_weather
+from .weather import normalize_unit as normalize_temperature_unit
 
-# If you want to check what's going on under the hood, set this to DEBUG
+
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+
+# ------------------------------------------------------------------------------
+# Constants & helpers
+# ------------------------------------------------------------------------------
 SUPPORTED_COLOR_SCHEMES: Final[frozenset[str]] = frozenset({"light", "dark"})
 CLIENT_THEME_TOOL_NAME: Final[str] = "switch_theme"
-
-
-def _normalize_color_scheme(value: str) -> str:
-    normalized = str(value).strip().lower()
-    if normalized in SUPPORTED_COLOR_SCHEMES:
-        return normalized
-    if "dark" in normalized:
-        return "dark"
-    if "light" in normalized:
-        return "light"
-    raise ValueError("Theme must be either 'light' or 'dark'.")
 
 
 def _gen_id(prefix: str) -> str:
@@ -66,13 +61,40 @@ def _is_tool_completion_item(item: Any) -> bool:
     return isinstance(item, ClientToolCallItem)
 
 
+def _normalize_color_scheme(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in SUPPORTED_COLOR_SCHEMES:
+        return normalized
+    if "dark" in normalized:
+        return "dark"
+    if "light" in normalized:
+        return "light"
+    raise ValueError("Theme must be either 'light' or 'dark'.")
+
+
+def _user_message_text(item: UserMessageItem) -> str:
+    return " ".join(
+        part.text for part in item.content if getattr(part, "text", None)
+    ).strip()
+
+
+# ------------------------------------------------------------------------------
+# Agent context
+# ------------------------------------------------------------------------------
 class FactAgentContext(AgentContext):
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
     store: Annotated[MemoryStore, Field(exclude=True)]
     request_context: dict[str, Any]
 
 
-async def _stream_saved_hidden(ctx: RunContextWrapper[FactAgentContext], fact: Fact) -> None:
+# ------------------------------------------------------------------------------
+# Internal streaming helpers
+# ------------------------------------------------------------------------------
+async def _stream_saved_hidden(
+    ctx: RunContextWrapper[FactAgentContext], fact: Fact
+) -> None:
+    """Stream a hidden FACT_SAVED marker back to the client."""
     await ctx.context.stream(
         ThreadItemDoneEvent(
             item=HiddenContextItem(
@@ -80,14 +102,21 @@ async def _stream_saved_hidden(ctx: RunContextWrapper[FactAgentContext], fact: F
                 thread_id=ctx.context.thread.id,
                 created_at=datetime.now(),
                 content=(
-                    f'<FACT_SAVED id="{fact.id}" threadId="{ctx.context.thread.id}">{fact.text}</FACT_SAVED>'
+                    f'<FACT_SAVED id="{fact.id}" '
+                    f'threadId="{ctx.context.thread.id}">'
+                    f"{fact.text}</FACT_SAVED>"
                 ),
             ),
         )
     )
 
 
-@function_tool(description_override="Record a fact shared by the user so it is saved immediately.")
+# ------------------------------------------------------------------------------
+# Tools
+# ------------------------------------------------------------------------------
+@function_tool(
+    description_override="Record a fact shared by the user so it is saved immediately."
+)
 async def save_fact(
     ctx: RunContextWrapper[FactAgentContext],
     fact: str,
@@ -95,17 +124,25 @@ async def save_fact(
     try:
         saved = await fact_store.create(text=fact)
         confirmed = await fact_store.mark_saved(saved.id)
-        if confirmed is None:
-            raise ValueError("Failed to save fact")
+
+        if not confirmed:
+            raise RuntimeError("Fact confirmation failed")
+
         await _stream_saved_hidden(ctx, confirmed)
+
         ctx.context.client_tool_call = ClientToolCall(
             name="record_fact",
-            arguments={"fact_id": confirmed.id, "fact_text": confirmed.text},
+            arguments={
+                "fact_id": confirmed.id,
+                "fact_text": confirmed.text,
+            },
         )
-        print(f"FACT SAVED: {confirmed}")
+
+        logger.info("Fact saved: %s", confirmed.id)
         return {"fact_id": confirmed.id, "status": "saved"}
+
     except Exception:
-        logging.exception("Failed to save fact")
+        logger.exception("Failed to save fact")
         return None
 
 
@@ -116,103 +153,80 @@ async def switch_theme(
     ctx: RunContextWrapper[FactAgentContext],
     theme: str,
 ) -> dict[str, str] | None:
-    logging.debug(f"Switching theme to {theme}")
     try:
-        requested = _normalize_color_scheme(theme)
+        normalized = _normalize_color_scheme(theme)
         ctx.context.client_tool_call = ClientToolCall(
             name=CLIENT_THEME_TOOL_NAME,
-            arguments={"theme": requested},
+            arguments={"theme": normalized},
         )
-        return {"theme": requested}
+        logger.debug("Theme switched to %s", normalized)
+        return {"theme": normalized}
+
     except Exception:
-        logging.exception("Failed to switch theme")
+        logger.exception("Failed to switch theme")
         return None
 
 
 @function_tool(
-    description_override="Look up the current weather and upcoming forecast for a location and render an interactive weather dashboard."
+    description_override=(
+        "Look up the current weather and upcoming forecast for a location "
+        "and render an interactive weather dashboard."
+    )
 )
 async def get_weather(
     ctx: RunContextWrapper[FactAgentContext],
     location: str,
     unit: Literal["celsius", "fahrenheit"] | str | None = None,
 ) -> dict[str, str | None]:
-    print("[WeatherTool] tool invoked", {"location": location, "unit": unit})
+    logger.info("Weather lookup requested: %s (%s)", location, unit)
+
     try:
         normalized_unit = normalize_temperature_unit(unit)
-    except WeatherLookupError as exc:
-        print("[WeatherTool] invalid unit", {"error": str(exc)})
-        raise ValueError(str(exc)) from exc
-
-    try:
         data = await retrieve_weather(location, normalized_unit)
     except WeatherLookupError as exc:
-        print("[WeatherTool] lookup failed", {"error": str(exc)})
         raise ValueError(str(exc)) from exc
 
-    print(
-        "[WeatherTool] lookup succeeded",
-        {
-            "location": data.location,
-            "temperature": data.temperature,
-            "unit": data.temperature_unit,
-        },
-    )
     try:
         widget = render_weather_widget(data)
         copy_text = weather_widget_copy_text(data)
-        payload: Any
-        try:
-            payload = widget.model_dump()
-        except AttributeError:
-            payload = widget
-        print("[WeatherTool] widget payload", payload)
-    except Exception as exc:  # noqa: BLE001
-        print("[WeatherTool] widget build failed", {"error": str(exc)})
-        raise ValueError("Weather data is currently unavailable for that location.") from exc
-
-    print("[WeatherTool] streaming widget")
-    try:
         await ctx.context.stream_widget(widget, copy_text=copy_text)
-    except Exception as exc:  # noqa: BLE001
-        print("[WeatherTool] widget stream failed", {"error": str(exc)})
-        raise ValueError("Weather data is currently unavailable for that location.") from exc
-
-    print("[WeatherTool] widget streamed")
-
-    observed = data.observation_time.isoformat() if data.observation_time else None
+    except Exception as exc:
+        logger.exception("Weather widget rendering failed")
+        raise ValueError("Weather data is currently unavailable.") from exc
 
     return {
         "location": data.location,
         "unit": normalized_unit,
-        "observed_at": observed,
+        "observed_at": (
+            data.observation_time.isoformat()
+            if data.observation_time
+            else None
+        ),
     }
 
 
-def _user_message_text(item: UserMessageItem) -> str:
-    parts: list[str] = []
-    for part in item.content:
-        text = getattr(part, "text", None)
-        if text:
-            parts.append(text)
-    return " ".join(parts).strip()
-
-
+# ------------------------------------------------------------------------------
+# ChatKit server
+# ------------------------------------------------------------------------------
 class FactAssistantServer(ChatKitServer[dict[str, Any]]):
-    """ChatKit server wired up with the fact-recording tool."""
+    """ChatKit server wired up with fact recording, theming, and weather tools."""
 
     def __init__(self) -> None:
-        self.store: MemoryStore = MemoryStore()
+        self.store = MemoryStore()
         super().__init__(self.store)
-        tools = [save_fact, switch_theme, get_weather]
+
         self.assistant = Agent[FactAgentContext](
             model=MODEL,
             name="ChatKit Guide",
             instructions=INSTRUCTIONS,
-            tools=tools,  # type: ignore[arg-type]
+            tools=[save_fact, switch_theme, get_weather],  # type: ignore[arg-type]
         )
+
         self._thread_item_converter = self._init_thread_item_converter()
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     async def respond(
         self,
         thread: ThreadMetadata,
@@ -225,14 +239,11 @@ class FactAssistantServer(ChatKitServer[dict[str, Any]]):
             request_context=context,
         )
 
-        target_item: ThreadItem | None = item
-        if target_item is None:
-            target_item = await self._latest_thread_item(thread, context)
-
-        if target_item is None or _is_tool_completion_item(target_item):
+        target = item or await self._latest_thread_item(thread, context)
+        if not target or _is_tool_completion_item(target):
             return
 
-        agent_input = await self._to_agent_input(thread, target_item)
+        agent_input = await self._to_agent_input(thread, target)
         if agent_input is None:
             return
 
@@ -244,38 +255,44 @@ class FactAssistantServer(ChatKitServer[dict[str, Any]]):
 
         async for event in stream_agent_response(agent_context, result):
             yield event
-        return
 
-    async def to_message_content(self, _input: Attachment) -> ResponseInputContentParam:
-        raise RuntimeError("File attachments are not supported in this demo.")
+    async def to_message_content(
+        self, _input: Attachment
+    ) -> ResponseInputContentParam:
+        raise RuntimeError("File attachments are not supported.")
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
     def _init_thread_item_converter(self) -> Any | None:
-        converter_cls = ThreadItemConverter
-        if converter_cls is None or not callable(converter_cls):
+        if not callable(ThreadItemConverter):
             return None
 
-        attempts: tuple[dict[str, Any], ...] = (
+        for kwargs in (
             {"to_message_content": self.to_message_content},
             {"message_content_converter": self.to_message_content},
             {},
-        )
-
-        for kwargs in attempts:
+        ):
             try:
-                return converter_cls(**kwargs)
+                return ThreadItemConverter(**kwargs)
             except TypeError:
                 continue
+
         return None
 
     async def _latest_thread_item(
-        self, thread: ThreadMetadata, context: dict[str, Any]
+        self,
+        thread: ThreadMetadata,
+        context: dict[str, Any],
     ) -> ThreadItem | None:
         try:
-            items = await self.store.load_thread_items(thread.id, None, 1, "desc", context)
-        except Exception:  # pragma: no cover - defensive
+            items = await self.store.load_thread_items(
+                thread.id, None, 1, "desc", context
+            )
+            return items.data[0] if items.data else None
+        except Exception:
+            logger.exception("Failed to load latest thread item")
             return None
-
-        return items.data[0] if getattr(items, "data", None) else None
 
     async def _to_agent_input(
         self,
@@ -285,72 +302,51 @@ class FactAssistantServer(ChatKitServer[dict[str, Any]]):
         if _is_tool_completion_item(item):
             return None
 
-        converter = getattr(self, "_thread_item_converter", None)
-        if converter is not None:
-            for attr in (
+        converter = self._thread_item_converter
+        if converter:
+            for method_name in (
                 "to_input_item",
                 "convert",
                 "convert_item",
                 "convert_thread_item",
             ):
-                method = getattr(converter, attr, None)
-                if method is None:
+                method = getattr(converter, method_name, None)
+                if not method:
                     continue
-                call_args: list[Any] = [item]
-                call_kwargs: dict[str, Any] = {}
-                try:
-                    signature = inspect.signature(method)
-                except (TypeError, ValueError):
-                    signature = None
 
-                if signature is not None:
-                    params = [
-                        parameter
-                        for parameter in signature.parameters.values()
-                        if parameter.kind
-                        not in (
-                            inspect.Parameter.VAR_POSITIONAL,
-                            inspect.Parameter.VAR_KEYWORD,
-                        )
-                    ]
-                    if len(params) >= 2:
-                        next_param = params[1]
-                        if next_param.kind in (
+                try:
+                    sig = inspect.signature(method)
+                    args = [item]
+                    kwargs: dict[str, Any] = {}
+
+                    params = list(sig.parameters.values())
+                    if len(params) > 1:
+                        param = params[1]
+                        if param.kind in (
                             inspect.Parameter.POSITIONAL_ONLY,
                             inspect.Parameter.POSITIONAL_OR_KEYWORD,
                         ):
-                            call_args.append(thread)
+                            args.append(thread)
                         else:
-                            call_kwargs[next_param.name] = thread
+                            kwargs[param.name] = thread
 
-                result = method(*call_args, **call_kwargs)
-                if inspect.isawaitable(result):
-                    return await result
-                return result
+                    result = method(*args, **kwargs)
+                    return await result if inspect.isawaitable(result) else result
+
+                except Exception:
+                    logger.debug(
+                        "Converter method failed: %s", method_name, exc_info=True
+                    )
 
         if isinstance(item, UserMessageItem):
             return _user_message_text(item)
 
         return None
 
-    async def _add_hidden_item(
-        self,
-        thread: ThreadMetadata,
-        context: dict[str, Any],
-        content: str,
-    ) -> None:
-        await self.store.add_thread_item(
-            thread.id,
-            HiddenContextItem(
-                id=_gen_id("msg"),
-                thread_id=thread.id,
-                created_at=datetime.now(),
-                content=content,
-            ),
-            context,
-        )
 
-
-def create_chatkit_server() -> FactAssistantServer | None:
-    """Return a configured ChatKit server instance if dependencies are available."""
+# ------------------------------------------------------------------------------
+# Factory
+# ------------------------------------------------------------------------------
+def create_chatkit_server() -> FactAssistantServer:
+    """Create and return a configured ChatKit server."""
     return FactAssistantServer()
