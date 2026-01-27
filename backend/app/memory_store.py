@@ -1,56 +1,90 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from chatkit.store import NotFoundError, Store
 from chatkit.types import Attachment, Page, Thread, ThreadItem, ThreadMetadata
 
 
-@dataclass
+def utcnow() -> datetime:
+    """Timezone-aware UTC timestamp."""
+    return datetime.now(timezone.utc)
+
+
+@dataclass(slots=True)
 class _ThreadState:
     thread: ThreadMetadata
-    items: List[ThreadItem]
+    items: List[ThreadItem] = field(default_factory=list)
+    item_index: Dict[str, int] = field(default_factory=dict)
 
 
 class MemoryStore(Store[dict[str, Any]]):
-    """Simple in-memory store compatible with the ChatKit server interface."""
+    """
+    Simple in-memory Store compatible with ChatKit.
+
+    ⚠️ Not suitable for production:
+    - No persistence
+    - No authentication
+    - No attachment support
+    """
 
     def __init__(self) -> None:
         self._threads: Dict[str, _ThreadState] = {}
-        # Attachments intentionally unsupported; use a real store that enforces auth.
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _coerce_thread_metadata(thread: ThreadMetadata | Thread) -> ThreadMetadata:
-        """Return thread metadata without any embedded items (openai-chatkit>=1.0)."""
-        has_items = isinstance(thread, Thread) or "items" in getattr(
-            thread, "model_fields_set", set()
+        """
+        Ensure ThreadMetadata contains no embedded items.
+        Compatible with openai-chatkit >= 1.0.
+        """
+        has_items = isinstance(thread, Thread) or (
+            hasattr(thread, "model_fields_set")
+            and "items" in thread.model_fields_set
         )
+
         if not has_items:
             return thread.model_copy(deep=True)
 
-        data = thread.model_dump()
-        data.pop("items", None)
-        return ThreadMetadata(**data).model_copy(deep=True)
+        data = thread.model_dump(exclude={"items"})
+        return ThreadMetadata(**data)
 
-    # -- Thread metadata -------------------------------------------------
-    async def load_thread(self, thread_id: str, context: dict[str, Any]) -> ThreadMetadata:
+    def _get_or_create_state(self, thread_id: str) -> _ThreadState:
         state = self._threads.get(thread_id)
-        if not state:
-            raise NotFoundError(f"Thread {thread_id} not found")
-        return self._coerce_thread_metadata(state.thread)
+        if state is None:
+            state = _ThreadState(
+                thread=ThreadMetadata(id=thread_id, created_at=utcnow())
+            )
+            self._threads[thread_id] = state
+        return state
+
+    # ------------------------------------------------------------------
+    # Threads
+    # ------------------------------------------------------------------
+
+    async def load_thread(self, thread_id: str, context: dict[str, Any]) -> ThreadMetadata:
+        async with self._lock:
+            state = self._threads.get(thread_id)
+            if not state:
+                raise NotFoundError(f"Thread {thread_id} not found")
+            return self._coerce_thread_metadata(state.thread)
 
     async def save_thread(self, thread: ThreadMetadata, context: dict[str, Any]) -> None:
         metadata = self._coerce_thread_metadata(thread)
-        state = self._threads.get(thread.id)
-        if state:
-            state.thread = metadata
-        else:
-            self._threads[thread.id] = _ThreadState(
-                thread=metadata,
-                items=[],
-            )
+
+        async with self._lock:
+            state = self._threads.get(metadata.id)
+            if state:
+                state.thread = metadata
+            else:
+                self._threads[metadata.id] = _ThreadState(thread=metadata)
 
     async def load_threads(
         self,
@@ -59,41 +93,37 @@ class MemoryStore(Store[dict[str, Any]]):
         order: str,
         context: dict[str, Any],
     ) -> Page[ThreadMetadata]:
-        threads = sorted(
-            (self._coerce_thread_metadata(state.thread) for state in self._threads.values()),
-            key=lambda t: t.created_at or datetime.min,
+        async with self._lock:
+            threads = [
+                self._coerce_thread_metadata(state.thread)
+                for state in self._threads.values()
+            ]
+
+        threads.sort(
+            key=lambda t: t.created_at or utcnow(),
             reverse=(order == "desc"),
         )
 
+        start = 0
         if after:
-            index_map = {thread.id: idx for idx, thread in enumerate(threads)}
-            start = index_map.get(after, -1) + 1
-        else:
-            start = 0
+            for i, thread in enumerate(threads):
+                if thread.id == after:
+                    start = i + 1
+                    break
 
-        slice_threads = threads[start : start + limit + 1]
-        has_more = len(slice_threads) > limit
-        slice_threads = slice_threads[:limit]
-        next_after = slice_threads[-1].id if has_more and slice_threads else None
-        return Page(
-            data=slice_threads,
-            has_more=has_more,
-            after=next_after,
-        )
+        page = threads[start : start + limit]
+        has_more = len(threads) > start + limit
+        next_after = page[-1].id if has_more and page else None
+
+        return Page(data=page, has_more=has_more, after=next_after)
 
     async def delete_thread(self, thread_id: str, context: dict[str, Any]) -> None:
-        self._threads.pop(thread_id, None)
+        async with self._lock:
+            self._threads.pop(thread_id, None)
 
-    # -- Thread items ----------------------------------------------------
-    def _items(self, thread_id: str) -> List[ThreadItem]:
-        state = self._threads.get(thread_id)
-        if state is None:
-            state = _ThreadState(
-                thread=ThreadMetadata(id=thread_id, created_at=datetime.utcnow()),
-                items=[],
-            )
-            self._threads[thread_id] = state
-        return state.items
+    # ------------------------------------------------------------------
+    # Thread Items
+    # ------------------------------------------------------------------
 
     async def load_thread_items(
         self,
@@ -103,73 +133,91 @@ class MemoryStore(Store[dict[str, Any]]):
         order: str,
         context: dict[str, Any],
     ) -> Page[ThreadItem]:
-        items = [item.model_copy(deep=True) for item in self._items(thread_id)]
+        async with self._lock:
+            state = self._get_or_create_state(thread_id)
+            items = [item.model_copy(deep=True) for item in state.items]
+
         items.sort(
-            key=lambda item: getattr(item, "created_at", datetime.utcnow()),
+            key=lambda i: getattr(i, "created_at", utcnow()),
             reverse=(order == "desc"),
         )
 
+        start = 0
         if after:
-            index_map = {item.id: idx for idx, item in enumerate(items)}
-            start = index_map.get(after, -1) + 1
-        else:
-            start = 0
+            for i, item in enumerate(items):
+                if item.id == after:
+                    start = i + 1
+                    break
 
-        slice_items = items[start : start + limit + 1]
-        has_more = len(slice_items) > limit
-        slice_items = slice_items[:limit]
-        next_after = slice_items[-1].id if has_more and slice_items else None
-        return Page(data=slice_items, has_more=has_more, after=next_after)
+        page = items[start : start + limit]
+        has_more = len(items) > start + limit
+        next_after = page[-1].id if has_more and page else None
+
+        return Page(data=page, has_more=has_more, after=next_after)
 
     async def add_thread_item(
-        self, thread_id: str, item: ThreadItem, context: dict[str, Any]
+        self,
+        thread_id: str,
+        item: ThreadItem,
+        context: dict[str, Any],
     ) -> None:
-        self._items(thread_id).append(item.model_copy(deep=True))
+        async with self._lock:
+            state = self._get_or_create_state(thread_id)
+            state.item_index[item.id] = len(state.items)
+            state.items.append(item.model_copy(deep=True))
 
-    async def save_item(self, thread_id: str, item: ThreadItem, context: dict[str, Any]) -> None:
-        items = self._items(thread_id)
-        for idx, existing in enumerate(items):
-            if existing.id == item.id:
-                items[idx] = item.model_copy(deep=True)
-                return
-        items.append(item.model_copy(deep=True))
+    async def save_item(
+        self,
+        thread_id: str,
+        item: ThreadItem,
+        context: dict[str, Any],
+    ) -> None:
+        async with self._lock:
+            state = self._get_or_create_state(thread_id)
+            idx = state.item_index.get(item.id)
 
-    async def load_item(self, thread_id: str, item_id: str, context: dict[str, Any]) -> ThreadItem:
-        for item in self._items(thread_id):
-            if item.id == item_id:
-                return item.model_copy(deep=True)
-        raise NotFoundError(f"Item {item_id} not found")
+            if idx is not None:
+                state.items[idx] = item.model_copy(deep=True)
+            else:
+                state.item_index[item.id] = len(state.items)
+                state.items.append(item.model_copy(deep=True))
+
+    async def load_item(
+        self,
+        thread_id: str,
+        item_id: str,
+        context: dict[str, Any],
+    ) -> ThreadItem:
+        async with self._lock:
+            state = self._threads.get(thread_id)
+            if not state:
+                raise NotFoundError(f"Thread {thread_id} not found")
+
+            idx = state.item_index.get(item_id)
+            if idx is None:
+                raise NotFoundError(f"Item {item_id} not found")
+
+            return state.items[idx].model_copy(deep=True)
 
     async def delete_thread_item(
-        self, thread_id: str, item_id: str, context: dict[str, Any]
-    ) -> None:
-        items = self._items(thread_id)
-        self._threads[thread_id].items = [item for item in items if item.id != item_id]
-
-    # -- Files -----------------------------------------------------------
-    # These methods are not currently used but required to be compatible with the Store interface.
-
-    async def save_attachment(
         self,
-        attachment: Attachment,
+        thread_id: str,
+        item_id: str,
         context: dict[str, Any],
     ) -> None:
-        raise NotImplementedError(
-            "MemoryStore does not persist attachments. Provide a Store implementation "
-            "that enforces authentication and authorization before enabling uploads."
-        )
+        async with self._lock:
+            state = self._threads.get(thread_id)
+            if not state:
+                return
 
-    async def load_attachment(
-        self,
-        attachment_id: str,
-        context: dict[str, Any],
-    ) -> Attachment:
-        raise NotImplementedError(
-            "MemoryStore does not load attachments. Provide a Store implementation "
-            "that enforces authentication and authorization before enabling uploads."
-        )
+            idx = state.item_index.pop(item_id, None)
+            if idx is None:
+                return
 
-    async def delete_attachment(self, attachment_id: str, context: dict[str, Any]) -> None:
-        raise NotImplementedError(
-            "MemoryStore does not delete attachments because they are never stored."
-        )
+            state.items.pop(idx)
+            # Rebuild index (safe + simple)
+            state.item_index = {item.id: i for i, item in enumerate(state.items)}
+
+    # ------------------------------------------------------------------
+    # Attachments (intentionally unsupported)
+    # --------------------------------------------
