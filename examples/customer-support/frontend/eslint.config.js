@@ -1,37 +1,62 @@
 import js from "@eslint/js";
 import globals from "globals";
+import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
-import tseslint from "@typescript-eslint/eslint-plugin";
-import tsParser from "@typescript-eslint/parser";
 
 export default [
+  // Base JS rules
   js.configs.recommended,
+
+  // TypeScript strict config
+  ...tseslint.configs.recommendedTypeChecked,
+
   {
-    files: ["**/*.{ts,tsx}", "*.{ts,tsx}"],
+    files: ["**/*.{ts,tsx}"],
+
     languageOptions: {
-      parser: tsParser,
+      parser: tseslint.parser,
       parserOptions: {
-        projectService: true,
-        ecmaFeatures: {
-          jsx: true,
-        },
+        project: "./tsconfig.json",
+        tsconfigRootDir: import.meta.dirname,
+        ecmaFeatures: { jsx: true },
       },
       globals: {
         ...globals.browser,
         ...globals.node,
       },
     },
+
     plugins: {
-      "@typescript-eslint": tseslint,
       "react-hooks": reactHooks,
       "react-refresh": reactRefresh,
     },
+
     rules: {
-      ...tseslint.configs["recommended-type-checked"].rules,
+      // React Hooks
       ...reactHooks.configs.recommended.rules,
-      "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
+
+      // React Refresh (Vite / Fast Refresh safe)
+      "react-refresh/only-export-components": [
+        "warn",
+        { allowConstantExport: true },
+      ],
+
+      // 🔥 Stronger TS rules (recommended for serious apps)
+      "@typescript-eslint/consistent-type-imports": "error",
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/await-thenable": "error",
+      "@typescript-eslint/no-unnecessary-type-assertion": "warn",
+
+      // Optional: stricter safety
+      "@typescript-eslint/no-explicit-any": "warn",
+    },
+
+    settings: {
+      react: {
+        version: "detect",
+      },
     },
   },
 ];
-
